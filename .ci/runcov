@@ -1,30 +1,120 @@
 #!/bin/sh
-# Run tests with instruction tracing enabled, then generate coverage reports.
+# Run tests with instruction tracing enabled, then generate combined coverage report.
 
-MIN_COVERAGE=25
+MIN_COVERAGE=85
 TRACE_DIR="/tmp/famnode_traces"
 export TRACE_DIR
 
-./.ci/runtests "$@" || exit 1
-
-RC=0
+./.ci/runtests rv32i "$@" || exit 1
 
 echo ""
 echo "=================================================================="
 echo " Combined Library Coverage"
 echo "=================================================================="
 
-# Merge all rv32i trace logs -- every test binary has the same code,
-# so we pick any one .bin and merge the traces for combined coverage.
-cat "$TRACE_DIR"/test_*_rv32i.log > "$TRACE_DIR/merged.log"
+# Each test binary contains all library code but at different addresses.
+# Run coverage per-test against its own binary, merge results by function name.
+python3 -c "
+import subprocess, sys, os, re, glob
 
-# Pick any test binary (they all contain the full library code)
-BIN=$(ls tmp/test_*_rv32i.bin 2>/dev/null | head -1)
-if [ -n "$BIN" ]; then
-	python3 tools/coverage.py "$BIN" "$TRACE_DIR/merged.log" --min $MIN_COVERAGE || RC=1
-else
-	echo "No test binaries found"
-	RC=1
-fi
+# Collect per-test function coverage by name: name -> (best_hit, total)
+func_coverage = {}
 
-exit $RC
+# Also track uncovered instructions per function (from best-coverage binary)
+func_uncovered = {}  # name -> list of 'func+offset' strings
+
+for binf in sorted(glob.glob('tmp/test_*_rv32i.bin')):
+    name = os.path.basename(binf).replace('.bin', '')
+    logf = os.path.join('$TRACE_DIR', f'{name}.log')
+    if not os.path.exists(logf):
+        continue
+
+    result = subprocess.run(
+        [sys.executable, 'tools/coverage.py', binf, logf],
+        capture_output=True, text=True
+    )
+
+    # Parse per-function lines: 'func_name    123   456  99.0%  status'
+    for line in result.stdout.splitlines():
+        m = re.match(r'(\S+)\s+(\d+)\s+(\d+)\s+[\d.]+%', line)
+        if m:
+            fname, hit, total = m.group(1), int(m.group(2)), int(m.group(3))
+            if fname in func_coverage:
+                old_hit, old_total = func_coverage[fname]
+                func_coverage[fname] = (max(old_hit, hit), max(old_total, total))
+            else:
+                func_coverage[fname] = (hit, total)
+
+    # Parse uncovered instruction lines: '  func+0, func+1, ...'
+    in_uncovered = False
+    for line in result.stdout.splitlines():
+        if 'Uncovered instructions:' in line:
+            in_uncovered = True
+            continue
+        if in_uncovered and line.startswith('  '):
+            # Extract func+offset entries
+            for entry in line.strip().split(', '):
+                entry = entry.strip()
+                if '+' in entry:
+                    fname = entry.split('+')[0]
+                    # Only record if this binary had the best coverage for this func
+                    if fname in func_coverage:
+                        func_uncovered.setdefault(fname, set()).add(entry)
+        elif in_uncovered and not line.strip():
+            in_uncovered = False
+
+# Remove uncovered entries for functions that are fully covered in another binary
+for fname in list(func_uncovered.keys()):
+    if fname in func_coverage:
+        hit, total = func_coverage[fname]
+        if hit >= total:
+            del func_uncovered[fname]
+
+# Report
+total_hit = sum(h for h, t in func_coverage.values())
+total_all = sum(t for h, t in func_coverage.values())
+pct = (total_hit / total_all * 100) if total_all > 0 else 0
+print(f'Code coverage: {total_hit}/{total_all} instructions ({pct:.1f}%)')
+print()
+
+# Per-function table (only show incomplete)
+uncovered = [(n, h, t) for n, (h, t) in sorted(func_coverage.items()) if h < t]
+if uncovered:
+    print(f\"{'Function':<35s} {'Hit':>5s} {'Total':>5s} {'Pct':>6s}  {'Status'}\")
+    print('─' * 65)
+    for name, hit, total in uncovered:
+        p = hit / total * 100
+        if hit == 0:
+            status = '✗ UNCOVERED'
+        else:
+            status = '~ partial'
+        print(f'{name:<35s} {hit:>5d} {total:>5d} {p:>5.1f}%  {status}')
+else:
+    print('All functions fully covered!')
+
+# Uncovered instructions
+all_uncovered = set()
+for entries in func_uncovered.values():
+    all_uncovered.update(entries)
+
+if all_uncovered:
+    print()
+    print('Uncovered instructions:')
+    print('─' * 65)
+    # Group by function
+    by_func = {}
+    for entry in sorted(all_uncovered):
+        fname = entry.split('+')[0]
+        by_func.setdefault(fname, []).append(entry)
+    for fname, entries in sorted(by_func.items()):
+        suffix = f' ... +{len(entries)-8} more' if len(entries) > 8 else ''
+        print(f'  {chr(44).join(entries[:8])}{suffix}')
+
+print()
+min_cov = $MIN_COVERAGE
+if pct >= min_cov:
+    print(f'Coverage {pct:.1f}% >= {min_cov}% threshold: PASS')
+else:
+    print(f'Coverage {pct:.1f}% < {min_cov}% threshold: FAIL')
+    sys.exit(1)
+" || exit 1

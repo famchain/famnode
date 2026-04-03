@@ -3,6 +3,11 @@
 # Usage: .ci/runtests [rv32i|rv32im|all]
 # Default: all (runs both architectures)
 
+if [ "$CI" = "true" ]; then
+	sudo apt-get update
+	sudo apt install -y gcc-riscv64-unknown-elf qemu-system-misc
+fi
+
 ARCH="${1:-all}"
 PREFIX="${RISCV_PREFIX:-riscv64-unknown-elf}"
 AS="${PREFIX}-as"
@@ -11,11 +16,6 @@ OBJCOPY="${PREFIX}-objcopy"
 if ! command -v "$AS" >/dev/null 2>&1; then
 	echo "Error: $AS not found. Set RISCV_PREFIX to your toolchain prefix."
 	exit 1
-fi
-
-if [ "$CI" = "true" ]; then
-	sudo apt-get update
-	sudo apt install -y gcc-riscv64-unknown-elf qemu-system-misc
 fi
 
 MARCH_I="-march=rv32i_zicsr -mabi=ilp32"

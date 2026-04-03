@@ -70,6 +70,12 @@ TEST_INIT
 	addi	sp, sp, 12
 	li	t0, 61
 	bne	a0, t0, test_fail
+	# combine([], 0, alpha) = 0
+	mv	a0, sp
+	li	a1, 0
+	li	a2, 5
+	jal	air_combine
+	bnez	a0, test_fail
 	PASS_TEST
 
 TEST_EXIT

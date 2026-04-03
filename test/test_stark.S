@@ -54,6 +54,24 @@ TEST_INIT
 	bnez	a0, test_fail
 	PASS_TEST
 
+	RUN_TEST tn_stark_tamper
+	# Corrupt the proof and verify it's rejected
+	li	t0, 0x62100
+	add	t0, gp, t0
+	lw	t1, 20(t0)		# corrupt first root word
+	xori	t1, t1, 1
+	sw	t1, 20(t0)
+	mv	a0, t0
+	jal	stark_verify
+	beqz	a0, test_fail		# should return -1
+	# Restore
+	li	t0, 0x62100
+	add	t0, gp, t0
+	lw	t1, 20(t0)
+	xori	t1, t1, 1
+	sw	t1, 20(t0)
+	PASS_TEST
+
 TEST_EXIT
 
 .include "lib_defines.inc"
@@ -62,6 +80,7 @@ DEFINE_TEST_HELPERS
 	.balign 4
 tn_stark_verify:	.asciz	"stark verify proof  "
 tn_prover_rt:		.asciz	"prover round-trip   "
+tn_stark_tamper:	.asciz	"stark verify tamper "
 
 _test_stark_proof:
 	.incbin "tmp/test_proof.bin"

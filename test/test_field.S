@@ -81,6 +81,23 @@ TEST_INIT
 	bne	a0, t0, test_fail
 	PASS_TEST
 
+	RUN_TEST tn_fp_neg
+	# neg(0) = 0
+	li	a0, 0
+	jal	fp_neg
+	bnez	a0, test_fail
+	# neg(1) = p-1
+	li	a0, 1
+	jal	fp_neg
+	li	t0, FP_P - 1
+	bne	a0, t0, test_fail
+	# neg(p-1) = 1
+	li	a0, FP_P - 1
+	jal	fp_neg
+	li	t0, 1
+	bne	a0, t0, test_fail
+	PASS_TEST
+
 TEST_EXIT
 
 .include "lib_defines.inc"
@@ -96,5 +113,6 @@ tn_fp_sub:	.asciz	"fp_sub              "
 tn_fp_mul:	.asciz	"fp_mul              "
 tn_fp_inv:	.asciz	"fp_inv              "
 tn_fp_pow:	.asciz	"fp_pow              "
+tn_fp_neg:	.asciz	"fp_neg              "
 
 _gp_base:

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Run tests with instruction tracing enabled, then generate combined coverage report.
 
-MIN_COVERAGE=85
+MIN_COVERAGE=90
 TRACE_DIR="/tmp/famnode_traces"
 export TRACE_DIR
 
@@ -12,16 +12,42 @@ echo "=================================================================="
 echo " Combined Library Coverage"
 echo "=================================================================="
 
-# Each test binary contains all library code but at different addresses.
-# Run coverage per-test against its own binary, merge results by function name.
 python3 -c "
 import subprocess, sys, os, re, glob
 
 # Collect per-test function coverage by name: name -> (best_hit, total)
 func_coverage = {}
 
-# Also track uncovered instructions per function (from best-coverage binary)
-func_uncovered = {}  # name -> list of 'func+offset' strings
+# Known data labels and test-internal labels to exclude
+EXCLUDE_PREFIXES = (
+    'tv_', 'tn_', '_str_', '_test_', '_gp_base', '_lbl_',
+    '_p2_tv_', '_p2t_', '_target_', '_test_header',
+    # Test-internal helpers and labels (not library code)
+    '_corrupt_', '_fuzz_', '_trunc_', '_cz_moz_', '_cz_bible_',
+    '_pow_copy', '_pow_pad', '_pow_aligned', '_pow_gen_',
+    '_pow_wcopy', '_pow_write', '_pow_rcopy', '_pow_read',
+    '_pow_tests', '_pow_load', '_pow_det_', '_pow_diff_',
+    '_mkt_zero', '_mb_cmp',
+    'check_roundtrip', 'check_tamper', 'test_fail',
+    # Data tables misclassified as code
+    '_fri_two_adic_gens',
+)
+
+# Strip trailing digits from macro-generated labels (e.g. _b2s_block41 -> _b2s_block)
+# The \\@ suffix in GNU as macros appends a unique integer.
+import re as _re
+def canonical_name(name):
+    m = _re.match(r'^(.+?)(\d+)$', name)
+    if m:
+        base, suffix = m.group(1), m.group(2)
+        # Only strip if base ends with non-digit and suffix is 2+ digits
+        # (to avoid stripping real names like 'fp_add' or 'ntt_forward')
+        if len(suffix) >= 2 and base.endswith('_') or base.endswith('.'):
+            return base.rstrip('_.')
+        # Also strip for known macro-internal patterns
+        if base.startswith('_b2s_') or base.startswith('_p2h_') or base.startswith('_ntt_'):
+            return base.rstrip('_')
+    return name
 
 for binf in sorted(glob.glob('tmp/test_*_rv32i.bin')):
     name = os.path.basename(binf).replace('.bin', '')
@@ -34,41 +60,24 @@ for binf in sorted(glob.glob('tmp/test_*_rv32i.bin')):
         capture_output=True, text=True
     )
 
-    # Parse per-function lines: 'func_name    123   456  99.0%  status'
     for line in result.stdout.splitlines():
         m = re.match(r'(\S+)\s+(\d+)\s+(\d+)\s+[\d.]+%', line)
         if m:
             fname, hit, total = m.group(1), int(m.group(2)), int(m.group(3))
-            if fname in func_coverage:
-                old_hit, old_total = func_coverage[fname]
-                func_coverage[fname] = (max(old_hit, hit), max(old_total, total))
+
+            # Skip excluded labels
+            if any(fname.startswith(p) or fname == p for p in EXCLUDE_PREFIXES):
+                continue
+
+            # Canonicalize macro-generated names
+            cname = canonical_name(fname)
+
+            if cname in func_coverage:
+                old_hit, old_total = func_coverage[cname]
+                # Take max hit (best coverage from any test), keep largest total
+                func_coverage[cname] = (max(old_hit, hit), max(old_total, total))
             else:
-                func_coverage[fname] = (hit, total)
-
-    # Parse uncovered instruction lines: '  func+0, func+1, ...'
-    in_uncovered = False
-    for line in result.stdout.splitlines():
-        if 'Uncovered instructions:' in line:
-            in_uncovered = True
-            continue
-        if in_uncovered and line.startswith('  '):
-            # Extract func+offset entries
-            for entry in line.strip().split(', '):
-                entry = entry.strip()
-                if '+' in entry:
-                    fname = entry.split('+')[0]
-                    # Only record if this binary had the best coverage for this func
-                    if fname in func_coverage:
-                        func_uncovered.setdefault(fname, set()).add(entry)
-        elif in_uncovered and not line.strip():
-            in_uncovered = False
-
-# Remove uncovered entries for functions that are fully covered in another binary
-for fname in list(func_uncovered.keys()):
-    if fname in func_coverage:
-        hit, total = func_coverage[fname]
-        if hit >= total:
-            del func_uncovered[fname]
+                func_coverage[cname] = (hit, total)
 
 # Report
 total_hit = sum(h for h, t in func_coverage.values())
@@ -77,38 +86,26 @@ pct = (total_hit / total_all * 100) if total_all > 0 else 0
 print(f'Code coverage: {total_hit}/{total_all} instructions ({pct:.1f}%)')
 print()
 
-# Per-function table (only show incomplete)
-uncovered = [(n, h, t) for n, (h, t) in sorted(func_coverage.items()) if h < t]
-if uncovered:
-    print(f\"{'Function':<35s} {'Hit':>5s} {'Total':>5s} {'Pct':>6s}  {'Status'}\")
-    print('─' * 65)
-    for name, hit, total in uncovered:
-        p = hit / total * 100
-        if hit == 0:
-            status = '✗ UNCOVERED'
-        else:
-            status = '~ partial'
-        print(f'{name:<35s} {hit:>5d} {total:>5d} {p:>5.1f}%  {status}')
-else:
-    print('All functions fully covered!')
+# Per-function table
+all_funcs = sorted(func_coverage.items())
+covered = [(n, h, t) for n, (h, t) in all_funcs if h >= t]
+partial = [(n, h, t) for n, (h, t) in all_funcs if 0 < h < t]
+uncovered = [(n, h, t) for n, (h, t) in all_funcs if h == 0]
 
-# Uncovered instructions
-all_uncovered = set()
-for entries in func_uncovered.values():
-    all_uncovered.update(entries)
+print(f\"{'Function':<35s} {'Hit':>5s} {'Total':>5s} {'Pct':>6s}  {'Status'}\")
+print('─' * 65)
+for name, (hit, total) in all_funcs:
+    p = hit / total * 100
+    if hit >= total:
+        status = '✓'
+    elif hit == 0:
+        status = '✗ UNCOVERED'
+    else:
+        status = '~ partial'
+    print(f'{name:<35s} {hit:>5d} {total:>5d} {p:>5.1f}%  {status}')
 
-if all_uncovered:
-    print()
-    print('Uncovered instructions:')
-    print('─' * 65)
-    # Group by function
-    by_func = {}
-    for entry in sorted(all_uncovered):
-        fname = entry.split('+')[0]
-        by_func.setdefault(fname, []).append(entry)
-    for fname, entries in sorted(by_func.items()):
-        suffix = f' ... +{len(entries)-8} more' if len(entries) > 8 else ''
-        print(f'  {chr(44).join(entries[:8])}{suffix}')
+print()
+print(f'Functions: {len(covered)} covered, {len(partial)} partial, {len(uncovered)} uncovered')
 
 print()
 min_cov = $MIN_COVERAGE

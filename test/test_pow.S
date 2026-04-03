@@ -205,6 +205,30 @@ _pow_tests:
 	bltz	a0, test_fail
 	PASS_TEST
 
+	RUN_TEST tn_pow_hash_direct
+	# Call pow_hash directly with separate state and output buffers
+	# to exercise _ph_copy path (out_ptr != state_ptr)
+	addi	sp, sp, -64		# 32 state + 32 output
+	# Init state = blake2s(_test_header)
+	LOAD_ADDRESS	a0, _test_header
+	li	a1, 128
+	mv	a2, sp			# state at sp
+	jal	blake2s
+	li	a0, POW_TABLE_ADDR
+	li	a1, POW_TABLE_MASK
+	mv	a2, sp			# state_ptr
+	addi	a3, sp, 32		# out_ptr (different from state_ptr)
+	jal	pow_hash
+	# output should be non-zero
+	lw	t0, 32(sp)
+	lw	t1, 36(sp)
+	or	t0, t0, t1
+	lw	t1, 40(sp)
+	or	t0, t0, t1
+	beqz	t0, test_fail
+	addi	sp, sp, 64
+	PASS_TEST
+
 	RUN_TEST tn_pow_hash
 	li	a0, POW_TABLE_ADDR
 	li	a1, POW_TABLE_MASK
@@ -339,6 +363,7 @@ DEFINE_TEST_HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 	.balign 4
 
+tn_pow_hash_direct:	.asciz	"pow_hash direct     "
 tn_pow_expand:		.asciz	"bible_expand        "
 tn_pow_hash:		.asciz	"pow_hash non-zero   "
 tn_pow_determ:		.asciz	"pow_hash determinism"

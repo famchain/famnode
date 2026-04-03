@@ -1,0 +1,44 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - '*'
+  pull_request:
+    branches:
+      - '*'
+  schedule:
+    - cron: '15 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: ${{ matrix.config.platform }} - ${{ matrix.task }}
+    runs-on: ${{ matrix.config.runner }}
+
+    strategy:
+      matrix:
+        config:
+          - platform: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+        task:
+          - runtests
+          - runcov
+          - runbenches
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check linux version
+        run: uname -a
+
+      - name: ${{ matrix.task }}
+        run: ./.ci/${{ matrix.task }}
+        env:
+          PLATFORM: ${{ matrix.config.platform }}

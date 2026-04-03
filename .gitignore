@@ -1,0 +1,4 @@
+tmp/
+*.o
+*.bin
+__pycache__/

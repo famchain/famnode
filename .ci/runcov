@@ -1,0 +1,30 @@
+#!/bin/sh
+# Run tests with instruction tracing enabled, then generate coverage reports.
+
+MIN_COVERAGE=25
+TRACE_DIR="/tmp/famnode_traces"
+export TRACE_DIR
+
+./.ci/runtests "$@" || exit 1
+
+RC=0
+
+echo ""
+echo "=================================================================="
+echo " Combined Library Coverage"
+echo "=================================================================="
+
+# Merge all rv32i trace logs -- every test binary has the same code,
+# so we pick any one .bin and merge the traces for combined coverage.
+cat "$TRACE_DIR"/test_*_rv32i.log > "$TRACE_DIR/merged.log"
+
+# Pick any test binary (they all contain the full library code)
+BIN=$(ls tmp/test_*_rv32i.bin 2>/dev/null | head -1)
+if [ -n "$BIN" ]; then
+	python3 tools/coverage.py "$BIN" "$TRACE_DIR/merged.log" --min $MIN_COVERAGE || RC=1
+else
+	echo "No test binaries found"
+	RC=1
+fi
+
+exit $RC

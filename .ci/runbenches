@@ -1,0 +1,54 @@
+#!/bin/sh
+# Run benchmarks. Informational only — not part of CI pass/fail.
+
+PREFIX="${RISCV_PREFIX:-riscv64-unknown-elf}"
+AS="${PREFIX}-as"
+OBJCOPY="${PREFIX}-objcopy"
+
+if ! command -v "$AS" >/dev/null 2>&1; then
+	echo "Error: $AS not found. Set RISCV_PREFIX to your toolchain prefix."
+	exit 1
+fi
+
+if [ "$CI" = "true" ]; then
+	sudo apt-get update
+	sudo apt install -y gcc-riscv64-unknown-elf qemu-system-misc
+fi
+
+MARCH_I="-march=rv32i_zicsr -mabi=ilp32"
+MARCH_IM="-march=rv32im_zicsr -mabi=ilp32"
+
+mkdir -p tmp
+
+# Auto-generate library includes
+echo '.include "macros.inc"' > tmp/lib_includes.inc
+: > tmp/lib_defines.inc
+for f in inc/*.inc; do
+	name=$(basename "$f")
+	case "$name" in macros.inc|test.inc) continue ;; esac
+	echo ".include \"$name\"" >> tmp/lib_includes.inc
+	macro=$(grep '\.macro DEFINE_' "$f" | sed 's/.*\.macro //' | head -1)
+	if [ -n "$macro" ]; then
+		echo "$macro" >> tmp/lib_defines.inc
+	fi
+done
+
+run_bench() {
+	local name="$1" src="$2" tmout="${3:-120}" qemu_extra="$4" march="${5:-$MARCH_I}" as_extra="$6"
+	echo "══════════════════════════════════"
+	echo " $name"
+	echo "══════════════════════════════════"
+	$AS $march -I inc -I tmp $as_extra -o "tmp/$name.o" "$src" || { echo "BUILD FAILED"; return 1; }
+	$OBJCOPY -O binary "tmp/$name.o" "tmp/$name.bin" || { echo "OBJCOPY FAILED"; return 1; }
+	timeout "$tmout" qemu-system-riscv32 \
+		-machine virt -nographic -bios none -smp 1 \
+		$qemu_extra \
+		-device loader,file="tmp/$name.bin",addr=0x80000000 \
+		</dev/null 2>/dev/null
+	echo ""
+}
+
+run_bench "bench_wots" "bench/bench_wots.S"
+run_bench "bench_compress" "bench/bench_compress.S" 120 "-m 256M"
+run_bench "bench_stark_rv32i" "bench/bench_stark.S" 300 "-m 256M"
+run_bench "bench_stark_rv32im" "bench/bench_stark.S" 300 "-m 256M" "$MARCH_IM" "--defsym HAVE_M_ASM=1"

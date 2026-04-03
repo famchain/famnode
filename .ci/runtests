@@ -1,0 +1,145 @@
+#!/bin/sh
+# Run all unit tests.
+# Usage: .ci/runtests [rv32i|rv32im|all]
+# Default: all (runs both architectures)
+
+ARCH="${1:-all}"
+PREFIX="${RISCV_PREFIX:-riscv64-unknown-elf}"
+AS="${PREFIX}-as"
+OBJCOPY="${PREFIX}-objcopy"
+
+if ! command -v "$AS" >/dev/null 2>&1; then
+	echo "Error: $AS not found. Set RISCV_PREFIX to your toolchain prefix."
+	exit 1
+fi
+
+if [ "$CI" = "true" ]; then
+	sudo apt-get update
+	sudo apt install -y gcc-riscv64-unknown-elf qemu-system-misc
+fi
+
+MARCH_I="-march=rv32i_zicsr -mabi=ilp32"
+MARCH_IM="-march=rv32im_zicsr -mabi=ilp32"
+
+PASS=0
+FAIL=0
+
+# Coverage mode: set TRACE_DIR to enable QEMU instruction tracing
+QEMU_TRACE_FLAGS=""
+if [ -n "$TRACE_DIR" ]; then
+	mkdir -p "$TRACE_DIR"
+	rm -f "$TRACE_DIR"/*.log
+fi
+
+# ── Auto-generate library includes from inc/*.inc ──
+mkdir -p tmp
+echo '.include "macros.inc"' > tmp/lib_includes.inc
+: > tmp/lib_defines.inc
+for f in inc/*.inc; do
+	name=$(basename "$f")
+	case "$name" in macros.inc|test.inc) continue ;; esac
+	echo ".include \"$name\"" >> tmp/lib_includes.inc
+	macro=$(grep '\.macro DEFINE_' "$f" | sed 's/.*\.macro //' | head -1)
+	if [ -n "$macro" ]; then
+		echo "$macro" >> tmp/lib_defines.inc
+	fi
+done
+
+# ── Generate STARK test proof if missing ──
+if [ ! -f tmp/test_proof.bin ]; then
+	python3 tools/stark_prover.py tmp/test_proof.bin
+fi
+
+# ── Create test disk if missing ──
+if [ ! -f tmp/test_disk.img ]; then
+	dd if=/dev/zero of=tmp/test_disk.img bs=1M count=32 2>/dev/null
+fi
+
+# ── Helpers ──
+
+pass() {
+	echo "  PASS: $1"
+	PASS=$((PASS + 1))
+}
+
+fail() {
+	echo "  FAIL: $1"
+	FAIL=$((FAIL + 1))
+}
+
+run_test() {
+	# $1 = source file, $2 = march flags, $3 = extra as flags, $4 = arch label
+	# $5 = timeout (default 300), $6 = extra qemu flags
+	local src="$1"
+	local march="$2"
+	local as_extra="$3"
+	local arch_label="$4"
+	local tmout="${5:-300}"
+	local qemu_extra="$6"
+
+	local name
+	name=$(basename "$src" .S)
+	local label="${name} (${arch_label})"
+
+	echo "--- ${label} ---"
+
+	if ! "$AS" $march -I inc -I tmp $as_extra -o "tmp/${name}_${arch_label}.o" "$src" 2>&1; then
+		fail "${label} (build)"
+		return
+	fi
+	if ! "$OBJCOPY" -O binary "tmp/${name}_${arch_label}.o" "tmp/${name}_${arch_label}.bin" 2>&1; then
+		fail "${label} (objcopy)"
+		return
+	fi
+
+	local trace_flags=""
+	if [ -n "$TRACE_DIR" ]; then
+		trace_flags="-d in_asm -D $TRACE_DIR/${name}_${arch_label}.log"
+	fi
+
+	local output
+	output=$(timeout "$tmout" qemu-system-riscv32 \
+		-machine virt -nographic -bios none -smp 1 \
+		$trace_flags $qemu_extra \
+		-device loader,file="tmp/${name}_${arch_label}.bin",addr=0x80000000 \
+		</dev/null 2>/dev/null)
+	local rc=$?
+
+	echo "$output"
+	if [ "$rc" -eq 0 ]; then
+		local p
+		local f
+		p=$(echo "$output" | grep -c "PASS")
+		f=$(echo "$output" | grep -c "FAIL")
+		PASS=$((PASS + p))
+		FAIL=$((FAIL + f))
+	else
+		fail "${label} (timeout/crash)"
+	fi
+}
+
+QEMU_DISK="-m 256M -drive file=tmp/test_disk.img,if=none,format=raw,id=dr0 -device virtio-blk-device,drive=dr0,bus=virtio-mmio-bus.0"
+
+# ── Run all test/test_*.S files ──
+for src in test/test_*.S; do
+	[ -f "$src" ] || continue
+
+	if [ "$ARCH" = "all" ] || [ "$ARCH" = "rv32i" ]; then
+		run_test "$src" "$MARCH_I" "" "rv32i" 300 "$QEMU_DISK"
+	fi
+	if [ "$ARCH" = "all" ] || [ "$ARCH" = "rv32im" ]; then
+		run_test "$src" "$MARCH_IM" "--defsym HAVE_M_ASM=1" "rv32im" 300 "$QEMU_DISK"
+	fi
+done
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Summary
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "══════════════════════════════════"
+echo "Results: $PASS passed, $FAIL failed"
+echo "══════════════════════════════════"
+
+if [ "$FAIL" -ne 0 ]; then
+	exit 1
+fi
